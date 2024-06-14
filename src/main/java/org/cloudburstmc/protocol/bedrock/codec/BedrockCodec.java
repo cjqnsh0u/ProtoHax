@@ -26,14 +26,14 @@ public final class BedrockCodec {
     private static final InternalLogger log = InternalLoggerFactory.getInstance(BedrockCodec.class);
 
     @Getter
-    private final int protocolVersion;
+    public final int protocolVersion;
     @Getter
-    private final String minecraftVersion;
+    public final String minecraftVersion;
     private final BedrockPacketDefinition<? extends BedrockPacket>[] packetsById;
     private final Map<Class<? extends BedrockPacket>, BedrockPacketDefinition<? extends BedrockPacket>> packetsByClass;
     private final Supplier<BedrockCodecHelper> helperFactory;
     @Getter
-    private final int raknetProtocolVersion;
+    public final int raknetProtocolVersion;
 
     public static Builder builder() {
         return new Builder();
