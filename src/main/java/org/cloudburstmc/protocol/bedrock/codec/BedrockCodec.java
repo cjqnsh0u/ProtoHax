@@ -3,13 +3,8 @@ package org.cloudburstmc.protocol.bedrock.codec;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
-import lombok.AccessLevel;
-import lombok.Getter;
-import lombok.NoArgsConstructor;
-import lombok.RequiredArgsConstructor;
 import org.checkerframework.checker.index.qual.NonNegative;
 import org.checkerframework.checker.nullness.qual.NonNull;
-import org.cloudburstmc.protocol.bedrock.data.PacketRecipient;
 import org.cloudburstmc.protocol.bedrock.packet.BedrockPacket;
 import org.cloudburstmc.protocol.bedrock.packet.UnknownPacket;
 
@@ -21,37 +16,25 @@ import java.util.function.Supplier;
 import static org.cloudburstmc.protocol.common.util.Preconditions.checkArgument;
 import static org.cloudburstmc.protocol.common.util.Preconditions.checkNotNull;
 
-@RequiredArgsConstructor(access = AccessLevel.PRIVATE)
+/**
+ * fallback serialization errors into [UnknownPacket] to make sure packets are symmetric
+ */
 public final class BedrockCodec {
     private static final InternalLogger log = InternalLoggerFactory.getInstance(BedrockCodec.class);
-
-    @Getter
-    public final int protocolVersion;
-    @Getter
-    public final String minecraftVersion;
+    private final int protocolVersion;
+    private final String minecraftVersion;
     private final BedrockPacketDefinition<? extends BedrockPacket>[] packetsById;
     private final Map<Class<? extends BedrockPacket>, BedrockPacketDefinition<? extends BedrockPacket>> packetsByClass;
     private final Supplier<BedrockCodecHelper> helperFactory;
-    @Getter
-    public final int raknetProtocolVersion;
+    private final int raknetProtocolVersion;
 
     public static Builder builder() {
         return new Builder();
     }
 
-    public BedrockPacket tryDecode(BedrockCodecHelper helper, ByteBuf buf, int id) throws PacketSerializeException {
-        return tryDecode(helper, buf, id, null);
-    }
-
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public BedrockPacket tryDecode(BedrockCodecHelper helper, ByteBuf buf, int id, PacketRecipient recipient) throws PacketSerializeException {
+    public BedrockPacket tryDecode(BedrockCodecHelper helper, ByteBuf buf, int id) throws PacketSerializeException {
         BedrockPacketDefinition<? extends BedrockPacket> definition = getPacketDefinition(id);
-
-        if (definition != null && recipient != null && definition.getRecipient() != PacketRecipient.BOTH &&
-                definition.getRecipient() != recipient) {
-            throw new IllegalArgumentException("Packet " + definition.getFactory().get().getClass().getSimpleName() + " was sent to " + recipient + " instead of " + definition.getRecipient());
-        }
-
         BedrockPacket packet;
         BedrockPacketSerializer<BedrockPacket> serializer;
         if (definition == null) {
@@ -63,15 +46,27 @@ public final class BedrockCodec {
             packet = definition.getFactory().get();
             serializer = (BedrockPacketSerializer) definition.getSerializer();
         }
-
+        final int readIndex = buf.readerIndex();
+        boolean hasFailure = false;
         try {
             serializer.deserialize(buf, helper, packet);
         } catch (Exception e) {
-            throw new PacketSerializeException("Error whilst deserializing " + packet, e);
+            // throw new PacketSerializeException("Error whilst deserializing " + packet, e);
+            log.error("Error whilst deserializing " + packet, e);
+            hasFailure = true;
         }
-
-        if (log.isDebugEnabled() && buf.isReadable()) {
-            log.debug(packet.getClass().getSimpleName() + " still has " + buf.readableBytes() + " bytes to read!");
+        if (!hasFailure && buf.isReadable()) {
+            hasFailure = true;
+            if (log.isDebugEnabled()) {
+                log.debug(packet.getClass().getSimpleName() + " still has " + buf.readableBytes() + " bytes to read!");
+            }
+        }
+        if (hasFailure) {
+            buf.readerIndex(readIndex);
+            UnknownPacket unknownPacket = new UnknownPacket();
+            unknownPacket.setPacketId(id);
+            unknownPacket.deserialize(buf, helper, unknownPacket);
+            packet = unknownPacket;
         }
         return packet;
     }
@@ -111,18 +106,16 @@ public final class BedrockCodec {
 
     public Builder toBuilder() {
         Builder builder = new Builder();
-
         builder.packets.putAll(this.packetsByClass);
         builder.protocolVersion = this.protocolVersion;
         builder.raknetProtocolVersion = this.raknetProtocolVersion;
         builder.minecraftVersion = this.minecraftVersion;
         builder.helperFactory = this.helperFactory;
-
         return builder;
     }
 
+
     @SuppressWarnings({"unchecked", "ConstantConditions"})
-    @NoArgsConstructor(access = AccessLevel.PRIVATE)
     public static class Builder {
         private final Map<Class<? extends BedrockPacket>, BedrockPacketDefinition<? extends BedrockPacket>> packets = new IdentityHashMap<>();
         private int protocolVersion = -1;
@@ -130,38 +123,30 @@ public final class BedrockCodec {
         private String minecraftVersion = null;
         private Supplier<BedrockCodecHelper> helperFactory;
 
-        public <T extends BedrockPacket> Builder registerPacket(Supplier<T> factory, BedrockPacketSerializer<T> serializer, @NonNegative int id, PacketRecipient recipient) {
+        public <T extends BedrockPacket> Builder registerPacket(Supplier<T> factory, BedrockPacketSerializer<T> serializer, @NonNegative int id) {
             Class<? extends BedrockPacket> packetClass = factory.get().getClass();
-
             checkArgument(id >= 0, "id cannot be negative");
             checkArgument(!packets.containsKey(packetClass), "Packet class already registered");
-
-            BedrockPacketDefinition<T> info = new BedrockPacketDefinition<>(id, factory, serializer, recipient);
-
+            BedrockPacketDefinition<T> info = new BedrockPacketDefinition<>(id, factory, serializer);
             packets.put(packetClass, info);
-
             return this;
         }
 
         public <T extends BedrockPacket> Builder updateSerializer(Class<T> packetClass, BedrockPacketSerializer<T> serializer) {
             BedrockPacketDefinition<T> info = (BedrockPacketDefinition<T>) packets.get(packetClass);
             checkArgument(info != null, "Packet does not exist");
-            BedrockPacketDefinition<T> updatedInfo = new BedrockPacketDefinition<>(info.getId(), info.getFactory(), serializer, info.getRecipient());
-
+            BedrockPacketDefinition<T> updatedInfo = new BedrockPacketDefinition<>(info.getId(), info.getFactory(), serializer);
             packets.replace(packetClass, info, updatedInfo);
-
             return this;
         }
 
         public Builder retainPackets(Class<? extends BedrockPacket>... packets) {
             this.packets.keySet().retainAll(Arrays.asList(packets));
-
             return this;
         }
 
         public Builder deregisterPacket(Class<? extends BedrockPacket> packetClass) {
             checkNotNull(packetClass, "packetClass");
-
             BedrockPacketDefinition<? extends BedrockPacket> info = packets.remove(packetClass);
             return this;
         }
@@ -203,11 +188,34 @@ public final class BedrockCodec {
             }
             checkArgument(largestId > -1, "Must have at least one packet registered");
             BedrockPacketDefinition<? extends BedrockPacket>[] packetsById = new BedrockPacketDefinition[largestId + 1];
-
             for (BedrockPacketDefinition<? extends BedrockPacket> info : packets.values()) {
                 packetsById[info.getId()] = info;
             }
             return new BedrockCodec(protocolVersion, minecraftVersion, packetsById, packets, helperFactory, raknetProtocolVersion);
         }
+
+        private Builder() {
+        }
+    }
+
+    private BedrockCodec(final int protocolVersion, final String minecraftVersion, final BedrockPacketDefinition<? extends BedrockPacket>[] packetsById, final Map<Class<? extends BedrockPacket>, BedrockPacketDefinition<? extends BedrockPacket>> packetsByClass, final Supplier<BedrockCodecHelper> helperFactory, final int raknetProtocolVersion) {
+        this.protocolVersion = protocolVersion;
+        this.minecraftVersion = minecraftVersion;
+        this.packetsById = packetsById;
+        this.packetsByClass = packetsByClass;
+        this.helperFactory = helperFactory;
+        this.raknetProtocolVersion = raknetProtocolVersion;
+    }
+
+    public int getProtocolVersion() {
+        return this.protocolVersion;
+    }
+
+    public String getMinecraftVersion() {
+        return this.minecraftVersion;
+    }
+
+    public int getRaknetProtocolVersion() {
+        return this.raknetProtocolVersion;
     }
 }
