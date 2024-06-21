@@ -226,7 +226,7 @@ class GameSession : MinecraftRelayPacketListener {
 	}
 
     companion object {
-        const val RECOMMENDED_VERSION = "1.20.0"
-		const val COLORED_NAME = "§9§lProtoHax§r"
+        const val RECOMMENDED_VERSION = "1.20.70"
+		const val COLORED_NAME = "§9§lAtomic§r"
     }
 }
